@@ -1,9 +1,4 @@
-# Least-Privilege AWS DMS CDC Migration from SQL Server
-
-> **Status: INTERNAL STAGING FOR SECURITY REVIEW (PCSR)**
-> This repository is staged on gitlab.aws.dev for the Public Content Security Review.
-> The final home for this code is an **aws-samples** repository, published through the
-> AWS Open Source sample code process. Do not depend on this repository.
+# Run Least-Privilege AWS DMS CDC Migration from SQL Server
 
 > **Disclaimer:** This is sample code, for non-production usage. You should work with
 > your security and legal teams to meet your organizational security, regulatory and
