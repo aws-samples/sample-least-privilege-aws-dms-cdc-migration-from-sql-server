@@ -13,6 +13,7 @@ DMS user account, using SQL Server certificate-based code signing and AWS Secret
 
 | Path | Purpose |
 |------|---------|
+| `dms_setup_standalone_nonsysadmin.sql` | All-in-one setup script for standalone SQL Server (version-aware; auto-detects `fn_dump_dblog` parameters for SQL Server 2016–2022) |
 | `sql/01_create_schema_and_functions.sql` | Creates the `awsdms` schema and heartbeat helper function |
 | `sql/02_create_stored_procedures.sql` | Wrapper procedures for `fn_dump_dblog` and `fn_position_1st_timestamp` |
 | `sql/03_create_certificates_and_sign.sql` | Certificates, certificate-based logins, and `ADD SIGNATURE` |
@@ -23,12 +24,28 @@ DMS user account, using SQL Server certificate-based code signing and AWS Secret
 
 ## Usage
 
+**Option A — All-in-one script (standalone SQL Server):**
+
+1. Open `dms_setup_standalone_nonsysadmin.sql` and set the three `CHANGE ME` values
+   (DMS login, source database, certificate password). Never commit or reuse the
+   placeholder password.
+2. Run the script as sysadmin. It auto-detects your SQL Server version and creates all
+   objects, certificates, signatures, and grants in one pass.
+
+**Option B — Step-by-step scripts:**
+
 1. Run the SQL scripts in order (01 → 04) against the `master` database on your source
    SQL Server instance. Pass certificate passwords as SQLCMD variables — never hardcode them.
-2. Deploy the CloudFormation template to create the secrets and IAM role.
-3. Create the DMS source endpoint referencing the secret, with the
-   `enableNonSysadminWrapper=true;` extra connection attribute.
-4. For Always On AG environments, additionally run `05_ag_replica_setup.sql` on every replica.
+2. For Always On AG environments, additionally run `05_ag_replica_setup.sql` on every replica.
+
+**Then, for both options:**
+
+3. If your source endpoint uses AWS Secrets Manager for credentials (recommended for
+   sources reachable from AWS), deploy the CloudFormation template to create the secrets
+   and IAM role. For on-premises sources where you supply credentials directly on the
+   DMS endpoint, the CloudFormation template is optional.
+4. Create the DMS source endpoint with the `enableNonSysadminWrapper=true;` extra
+   connection attribute.
 
 See the blog post for the full walkthrough, validation steps, and limitations. For the
 authoritative procedure definitions, see
