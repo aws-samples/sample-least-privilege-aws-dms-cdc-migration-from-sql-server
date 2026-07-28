@@ -16,7 +16,9 @@
   PARAMETERS TO CHANGE (search for "CHANGE ME"):
   - @DMS_User       : The DMS endpoint user (login name)
   - @SourceDB       : The source database name to replicate
-  - @CertPassword   : Password for certificate encryption (change for production!)
+  - @CertPassword   : Password for certificate encryption (REQUIRED - the script
+                      refuses to run with the placeholder; retrieve the password
+                      from AWS Secrets Manager and never commit real values)
   
   VERSION COMPATIBILITY:
   - SQL Server 2016/2017: fn_dump_dblog has 63 params (5 named + 58 defaults)
@@ -34,8 +36,14 @@
 -- ============================================================================
 DECLARE @DMS_User NVARCHAR(128) = N'dms_user';            -- CHANGE ME: DMS endpoint login
 DECLARE @SourceDB NVARCHAR(128) = N'SourceDB';            -- CHANGE ME: Source database name
-DECLARE @CertPassword NVARCHAR(128) = N'@5trongpassword'; -- CHANGE ME: Certificate password
+DECLARE @CertPassword NVARCHAR(128) = N'CHANGE_ME';       -- CHANGE ME: Certificate password (retrieve from AWS Secrets Manager; never commit real values)
 -- ============================================================================
+
+-- Guard: refuse to run with the placeholder password
+IF @CertPassword = N'CHANGE_ME'
+BEGIN
+    RAISERROR ('Set @CertPassword to a strong password before running this script. Retrieve it from AWS Secrets Manager; never commit real values.', 20, 1) WITH LOG;
+END
 
 -- Store config in temp table so it persists across GO batches
 IF OBJECT_ID('tempdb..#DMS_Config') IS NOT NULL DROP TABLE #DMS_Config;
