@@ -22,12 +22,17 @@ The tested implementation uses SQL Server certificate-signed wrapper procedures.
 
 - A self-managed SQL Server source version supported by AWS DMS, using full or bulk-logged recovery
 - A SQL Server login dedicated to the DMS endpoint; the standalone setup validates that it already exists
+- An edition that can act as a transactional replication publisher, such as Standard or Enterprise. Express and Web editions can only be subscribers, so the publication step fails on them.
+- SQL Server authentication (Mixed Mode) enabled, because the DMS endpoint uses a password-based SQL login. `SELECT SERVERPROPERTY('IsIntegratedSecurityOnly')` must return `0`; changing it requires a service restart.
+- A replication working directory that already exists and is writable by the SQL Server Agent service account. Distribution setup fails otherwise.
 - `sysadmin` access for the one-time distribution, publication, certificate, and signing setup
 - SQLCMD for the modular and cleanup commands
 - An AWS DMS replication instance that can reach the SQL Server source and AWS Secrets Manager
 - For a private DMS instance without internet egress, a Secrets Manager interface VPC endpoint with private DNS and TCP 443 access from the DMS security group
 
 DMS endpoint passwords cannot contain semicolon (`;`), plus (`+`), or percent (`%`) characters.
+
+Validated on SQL Server 2022 Standard Edition (16.0.4265.3) with AWS DMS 3.5.4.
 
 ## Quick start
 
@@ -41,6 +46,8 @@ sqlcmd -S <server> -d <source-database> \
   -v REPLDATA_DIR="C:\Program Files\Microsoft SQL Server\MSSQL\ReplData" \
      CREATE_PUBLICATION="1"
 ```
+
+`REPLDATA_DIR` must already exist and be writable by the SQL Server Agent service account.
 
 The script configures the instance as its own distributor when needed, creates a continuous anonymous publication, and adds primary-key user tables as log-based articles with the deliberate `(1=0)` filter. Run this command on a standalone source or the AG primary. Script 05 runs the same file with `CREATE_PUBLICATION=0` to configure distribution on each AG secondary without creating duplicate publication state. Tables without primary keys are not added; configure MS-CDC separately if you need to capture them.
 
@@ -138,6 +145,11 @@ SELECT IS_SRVROLEMEMBER(N'sysadmin', N'dmsnosysadmin') AS is_sysadmin;
 ```
 
 Expected output: `0`.
+
+Confirm that elevation is scoped to the signed procedures. In an impersonated session
+(`EXECUTE AS LOGIN = N'dmsnosysadmin'`), a direct `sys.fn_dump_dblog` call is refused with
+error 9010, while `master.awsdms.rtm_dump_dblog` returns log records in that same session.
+`CREATE LOGIN` remains denied with error 15247.
 
 After starting CDC, the `SOURCE_CAPTURE` task log should contain these object checks:
 
