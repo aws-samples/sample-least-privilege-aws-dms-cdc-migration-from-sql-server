@@ -115,19 +115,19 @@ BEGIN
           + N'IF EXISTS (SELECT 1 FROM dbo.syspublications WHERE name = @publication) '
           + N'EXEC sys.sp_droppublication @publication = @publication;'
         ELSE N'' END
-      + N'IF IS_ROLEMEMBER(N''db_owner'', N''' + REPLACE(@dms_user, N'''', N''''''') + N''') = 1 '
+      + N'IF IS_ROLEMEMBER(N''db_owner'', ' + QUOTENAME(@dms_user, '''') + N') = 1 '
       + N'ALTER ROLE db_owner DROP MEMBER ' + @quoted_user + N';'
       + CASE WHEN @remove_users = 1 THEN
-          N'IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'''
-          + REPLACE(@dms_user, N'''', N'''''') + N''') DROP USER ' + @quoted_user + N';'
+          N'IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = '
+          + QUOTENAME(@dms_user, '''') + N') DROP USER ' + @quoted_user + N';'
         ELSE N'' END;
     EXEC sys.sp_executesql @sql;
 END
 
 -- Undo local msdb grants on every replica.
 SET @sql = N'USE msdb;'
-  + N'IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'''
-  + REPLACE(@dms_user, N'''', N'''''') + N''') BEGIN '
+  + N'IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = '
+  + QUOTENAME(@dms_user, '''') + N') BEGIN '
   + N'REVOKE SELECT ON dbo.backupset FROM ' + @quoted_user + N';'
   + N'REVOKE SELECT ON dbo.backupmediafamily FROM ' + @quoted_user + N';'
   + N'REVOKE SELECT ON dbo.backupfile FROM ' + @quoted_user + N';'

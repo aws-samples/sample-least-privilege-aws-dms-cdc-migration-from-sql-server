@@ -44,16 +44,16 @@ SET @sql =
 EXEC sys.sp_executesql @sql;
 
 SET @sql = N'USE ' + @quoted_database + N';'
-  + N'IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'''
-  + REPLACE(@dms_user, N'''', N'''''') + N''') '
+  + N'IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = '
+  + QUOTENAME(@dms_user, '''') + N') '
   + N'CREATE USER ' + @quoted_user + N' FOR LOGIN ' + @quoted_user + N';'
-  + N'IF IS_ROLEMEMBER(N''db_owner'', N''' + REPLACE(@dms_user, N'''', N''''''') + N''') <> 1 '
+  + N'IF IS_ROLEMEMBER(N''db_owner'', ' + QUOTENAME(@dms_user, '''') + N') <> 1 '
   + N'ALTER ROLE db_owner ADD MEMBER ' + @quoted_user + N';';
 EXEC sys.sp_executesql @sql;
 
 SET @sql = N'USE msdb;'
-  + N'IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'''
-  + REPLACE(@dms_user, N'''', N'''''') + N''') '
+  + N'IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = '
+  + QUOTENAME(@dms_user, '''') + N') '
   + N'CREATE USER ' + @quoted_user + N' FOR LOGIN ' + @quoted_user + N';'
   + N'GRANT SELECT ON dbo.backupset TO ' + @quoted_user + N';'
   + N'GRANT SELECT ON dbo.backupmediafamily TO ' + @quoted_user + N';'

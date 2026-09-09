@@ -46,9 +46,9 @@ IF EXISTS (SELECT 1 FROM sys.certificates WHERE name = N'awsdms_rtm_dump_dblog_c
 GO
 
 DECLARE @password NVARCHAR(128) = (SELECT certificate_password FROM #CertificateConfig);
-DECLARE @escaped_password NVARCHAR(256) = REPLACE(@password, N'''', N'''''''');
+DECLARE @quoted_password NVARCHAR(300) = QUOTENAME(@password, '''');
 EXEC(N'CREATE CERTIFICATE awsdms_rtm_dump_dblog_cert '
-    + N'ENCRYPTION BY PASSWORD = N''' + @escaped_password + N''' '
+    + N'ENCRYPTION BY PASSWORD = N' + @quoted_password + N' '
     + N'WITH SUBJECT = N''Certificate for FN_DUMP_DBLOG permissions'';');
 GO
 
@@ -58,10 +58,10 @@ ALTER SERVER ROLE sysadmin ADD MEMBER awsdms_rtm_dump_dblog_login;
 GO
 
 DECLARE @password NVARCHAR(128) = (SELECT certificate_password FROM #CertificateConfig);
-DECLARE @escaped_password NVARCHAR(256) = REPLACE(@password, N'''', N'''''''');
+DECLARE @quoted_password NVARCHAR(300) = QUOTENAME(@password, '''');
 EXEC(N'ADD SIGNATURE TO awsdms.rtm_dump_dblog '
     + N'BY CERTIFICATE awsdms_rtm_dump_dblog_cert '
-    + N'WITH PASSWORD = N''' + @escaped_password + N''';');
+    + N'WITH PASSWORD = N' + @quoted_password + N';');
 GO
 
 IF EXISTS (SELECT 1 FROM sys.certificates WHERE name = N'awsdms_rtm_position_1st_timestamp_cert')
@@ -90,9 +90,9 @@ IF EXISTS (SELECT 1 FROM sys.certificates WHERE name = N'awsdms_rtm_position_1st
 GO
 
 DECLARE @password NVARCHAR(128) = (SELECT certificate_password FROM #CertificateConfig);
-DECLARE @escaped_password NVARCHAR(256) = REPLACE(@password, N'''', N'''''''');
+DECLARE @quoted_password NVARCHAR(300) = QUOTENAME(@password, '''');
 EXEC(N'CREATE CERTIFICATE awsdms_rtm_position_1st_timestamp_cert '
-    + N'ENCRYPTION BY PASSWORD = N''' + @escaped_password + N''' '
+    + N'ENCRYPTION BY PASSWORD = N' + @quoted_password + N' '
     + N'WITH SUBJECT = N''Certificate for first timestamp positioning permissions'';');
 GO
 
@@ -102,10 +102,10 @@ ALTER SERVER ROLE sysadmin ADD MEMBER awsdms_rtm_position_1st_timestamp_login;
 GO
 
 DECLARE @password NVARCHAR(128) = (SELECT certificate_password FROM #CertificateConfig);
-DECLARE @escaped_password NVARCHAR(256) = REPLACE(@password, N'''', N'''''''');
+DECLARE @quoted_password NVARCHAR(300) = QUOTENAME(@password, '''');
 EXEC(N'ADD SIGNATURE TO awsdms.rtm_position_1st_timestamp '
     + N'BY CERTIFICATE awsdms_rtm_position_1st_timestamp_cert '
-    + N'WITH PASSWORD = N''' + @escaped_password + N''';');
+    + N'WITH PASSWORD = N' + @quoted_password + N';');
 GO
 
 DROP TABLE #CertificateConfig;

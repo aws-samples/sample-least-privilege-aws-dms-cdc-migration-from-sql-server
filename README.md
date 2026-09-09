@@ -55,8 +55,13 @@ aws cloudformation deploy \
       DMSPassword=<endpoint-password-without-semicolon-plus-percent> \
       SQLServerHost=<sql-server-host-or-ag-listener> \
       CertPassword=<certificate-password> \
-  --capabilities CAPABILITY_IAM
+  --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND
 ```
+
+`CAPABILITY_AUTO_EXPAND` is required because the template uses the
+`AWS::LanguageExtensions` transform to build the secret JSON. The transform keeps
+each password as a parameter reference, so `NoEcho` protection is preserved and no
+plaintext password appears in the processed template.
 
 The DMS role trusts both `dms.amazonaws.com` and the Region-specific principal `dms.<region>.amazonaws.com`. It can read only the endpoint credential secret. The certificate password secret remains operator-only.
 
@@ -114,10 +119,15 @@ aws dms create-endpoint \
   --endpoint-identifier sqlserver-source \
   --endpoint-type source \
   --engine-name sqlserver \
-  --secrets-manager-secret-id <endpoint-secret-arn> \
-  --secrets-manager-access-role-arn <dms-role-arn> \
+  --database-name master \
+  --microsoft-sql-server-settings \
+      "SecretsManagerSecretId=<endpoint-secret-arn>,SecretsManagerAccessRoleArn=<dms-role-arn>" \
   --extra-connection-attributes "enableNonSysadminWrapper=true;"
 ```
+
+The Secrets Manager fields belong inside `--microsoft-sql-server-settings`; AWS DMS
+has no top-level `--secrets-manager-secret-id` option. `--database-name` is still
+required even when the secret contains `dbname`.
 
 ## Validation
 
