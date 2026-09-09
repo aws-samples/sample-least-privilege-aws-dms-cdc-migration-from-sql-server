@@ -9,9 +9,10 @@
   
   PREREQUISITES:
   1. SQL Server is configured for full backups (full recovery mode or bulk-logged mode)
-  2. MS-REPLICATION is enabled on the source database
-     (Run task once as sysadmin OR configure distribution manually)
-  3. Run this script as SYSADMIN
+  2. MS-Replication distribution and a DMS-compatible publication are configured
+     (Run sql/00_configure_replication.sql once as sysadmin)
+  3. The DMS endpoint server login already exists
+  4. Run this script as SYSADMIN
   
   PARAMETERS TO CHANGE (search for "CHANGE ME"):
   - @DMS_User       : The DMS endpoint user (login name)
@@ -39,11 +40,15 @@ DECLARE @SourceDB NVARCHAR(128) = N'SourceDB';            -- CHANGE ME: Source d
 DECLARE @CertPassword NVARCHAR(128) = N'CHANGE_ME';       -- CHANGE ME: Certificate password (retrieve from AWS Secrets Manager; never commit real values)
 -- ============================================================================
 
--- Guard: refuse to run with the placeholder password
+-- Guard: refuse to run with missing prerequisites or the placeholder password
 IF @CertPassword = N'CHANGE_ME'
-BEGIN
-    RAISERROR ('Set @CertPassword to a strong password before running this script. Retrieve it from AWS Secrets Manager; never commit real values.', 20, 1) WITH LOG;
-END
+    THROW 51050, 'Set @CertPassword to a strong password before running this script. Retrieve it from AWS Secrets Manager; never commit real values.', 1;
+
+IF DB_ID(@SourceDB) IS NULL
+    THROW 51051, 'The configured source database does not exist.', 1;
+
+IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = @DMS_User)
+    THROW 51052, 'The configured DMS server login does not exist. Create it before running this script.', 1;
 
 -- Store config in temp table so it persists across GO batches
 IF OBJECT_ID('tempdb..#DMS_Config') IS NOT NULL DROP TABLE #DMS_Config;
@@ -250,13 +255,14 @@ IF EXISTS (SELECT * FROM sys.certificates WHERE name = 'awsdms_rtm_dump_dblog_ce
     DROP CERTIFICATE [awsdms_rtm_dump_dblog_cert];
 
 DECLARE @sql NVARCHAR(MAX);
-SET @sql = 'CREATE CERTIFICATE [awsdms_rtm_dump_dblog_cert] ENCRYPTION BY PASSWORD = N''' + @CertPassword + ''' WITH SUBJECT = N''Certificate for FN_DUMP_DBLOG Permissions''';
+DECLARE @EscapedCertPassword NVARCHAR(256) = REPLACE(@CertPassword, '''', '''''');
+SET @sql = 'CREATE CERTIFICATE [awsdms_rtm_dump_dblog_cert] ENCRYPTION BY PASSWORD = N''' + @EscapedCertPassword + ''' WITH SUBJECT = N''Certificate for FN_DUMP_DBLOG Permissions''';
 EXEC sp_executesql @sql;
 
 CREATE LOGIN [awsdms_rtm_dump_dblog_login] FROM CERTIFICATE [awsdms_rtm_dump_dblog_cert];
 ALTER SERVER ROLE [sysadmin] ADD MEMBER [awsdms_rtm_dump_dblog_login];
 
-SET @sql = 'ADD SIGNATURE TO [master].[awsdms].[rtm_dump_dblog] BY CERTIFICATE [awsdms_rtm_dump_dblog_cert] WITH PASSWORD = ''' + @CertPassword + '''';
+SET @sql = 'ADD SIGNATURE TO [master].[awsdms].[rtm_dump_dblog] BY CERTIFICATE [awsdms_rtm_dump_dblog_cert] WITH PASSWORD = N''' + @EscapedCertPassword + '''';
 EXEC sp_executesql @sql;
 
 PRINT '  Certificate, login, sysadmin role, and signature applied.';
@@ -353,13 +359,14 @@ IF EXISTS (SELECT * FROM sys.certificates WHERE name = 'awsdms_rtm_position_1st_
     DROP CERTIFICATE [awsdms_rtm_position_1st_timestamp_cert];
 
 DECLARE @sql NVARCHAR(MAX);
-SET @sql = 'CREATE CERTIFICATE [awsdms_rtm_position_1st_timestamp_cert] ENCRYPTION BY PASSWORD = ''' + @CertPassword + ''' WITH SUBJECT = N''Certificate for FN_POSITION_1st_TIMESTAMP Permissions''';
+DECLARE @EscapedCertPassword NVARCHAR(256) = REPLACE(@CertPassword, '''', '''''');
+SET @sql = 'CREATE CERTIFICATE [awsdms_rtm_position_1st_timestamp_cert] ENCRYPTION BY PASSWORD = N''' + @EscapedCertPassword + ''' WITH SUBJECT = N''Certificate for timestamp positioning permissions''';
 EXEC sp_executesql @sql;
 
 CREATE LOGIN [awsdms_rtm_position_1st_timestamp_login] FROM CERTIFICATE [awsdms_rtm_position_1st_timestamp_cert];
 ALTER SERVER ROLE [sysadmin] ADD MEMBER [awsdms_rtm_position_1st_timestamp_login];
 
-SET @sql = 'ADD SIGNATURE TO [master].[awsdms].[rtm_position_1st_timestamp] BY CERTIFICATE [awsdms_rtm_position_1st_timestamp_cert] WITH PASSWORD = ''' + @CertPassword + '''';
+SET @sql = 'ADD SIGNATURE TO [master].[awsdms].[rtm_position_1st_timestamp] BY CERTIFICATE [awsdms_rtm_position_1st_timestamp_cert] WITH PASSWORD = N''' + @EscapedCertPassword + '''';
 EXEC sp_executesql @sql;
 
 PRINT '  Certificate, login, sysadmin role, and signature applied.';
@@ -375,24 +382,26 @@ GO
 DECLARE @DMS_User NVARCHAR(128);
 SELECT @DMS_User = DMS_User FROM #DMS_Config;
 DECLARE @sql NVARCHAR(MAX);
+DECLARE @QuotedUser NVARCHAR(258) = QUOTENAME(@DMS_User);
+DECLARE @EscapedUser NVARCHAR(258) = REPLACE(@DMS_User, '''', '''''');
 
 -- Create user in master if not exists
-SET @sql = 'IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = ''' + @DMS_User + ''') CREATE USER [' + @DMS_User + '] FOR LOGIN [' + @DMS_User + ']';
+SET @sql = 'IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N''' + @EscapedUser + ''') CREATE USER ' + @QuotedUser + ' FOR LOGIN ' + @QuotedUser + ';';
 EXEC sp_executesql @sql;
 
--- Grant permissions
-SET @sql = '
-GRANT SELECT ON sys.fn_dblog TO [' + @DMS_User + '];
-GRANT VIEW ANY DEFINITION TO [' + @DMS_User + '];
-GRANT VIEW SERVER STATE TO [' + @DMS_User + '];
-GRANT EXECUTE ON sp_repldone TO [' + @DMS_User + '];
-GRANT EXECUTE ON sp_replincrementlsn TO [' + @DMS_User + '];
-GRANT EXECUTE ON sp_addpublication TO [' + @DMS_User + '];
-GRANT EXECUTE ON sp_addarticle TO [' + @DMS_User + '];
-GRANT EXECUTE ON sp_articlefilter TO [' + @DMS_User + '];
-GRANT SELECT ON [awsdms].[split_partition_list] TO [' + @DMS_User + '];
-GRANT EXECUTE ON [awsdms].[rtm_dump_dblog] TO [' + @DMS_User + '];
-GRANT EXECUTE ON [awsdms].[rtm_position_1st_timestamp] TO [' + @DMS_User + '];';
+-- Grant the verified minimum working permission set
+SET @sql =
+    'GRANT SELECT ON sys.fn_dblog TO ' + @QuotedUser + ';'
+  + 'GRANT VIEW ANY DEFINITION TO ' + @QuotedUser + ';'
+  + 'GRANT VIEW SERVER STATE TO ' + @QuotedUser + ';'
+  + 'GRANT EXECUTE ON sys.sp_repldone TO ' + @QuotedUser + ';'
+  + 'GRANT EXECUTE ON sys.sp_replincrementlsn TO ' + @QuotedUser + ';'
+  + 'GRANT EXECUTE ON sys.sp_addpublication TO ' + @QuotedUser + ';'
+  + 'GRANT EXECUTE ON sys.sp_addarticle TO ' + @QuotedUser + ';'
+  + 'GRANT EXECUTE ON sys.sp_articlefilter TO ' + @QuotedUser + ';'
+  + 'GRANT SELECT ON awsdms.split_partition_list TO ' + @QuotedUser + ';'
+  + 'GRANT EXECUTE ON awsdms.rtm_dump_dblog TO ' + @QuotedUser + ';'
+  + 'GRANT EXECUTE ON awsdms.rtm_position_1st_timestamp TO ' + @QuotedUser + ';';
 EXEC sp_executesql @sql;
 
 PRINT '  Master database permissions granted.';
@@ -408,15 +417,17 @@ GO
 DECLARE @DMS_User NVARCHAR(128);
 SELECT @DMS_User = DMS_User FROM #DMS_Config;
 DECLARE @sql NVARCHAR(MAX);
+DECLARE @QuotedUser NVARCHAR(258) = QUOTENAME(@DMS_User);
+DECLARE @EscapedUser NVARCHAR(258) = REPLACE(@DMS_User, '''', '''''');
 
 -- Create user in msdb if not exists
-SET @sql = 'IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = ''' + @DMS_User + ''') CREATE USER [' + @DMS_User + '] FOR LOGIN [' + @DMS_User + ']';
+SET @sql = 'IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N''' + @EscapedUser + ''') CREATE USER ' + @QuotedUser + ' FOR LOGIN ' + @QuotedUser + ';';
 EXEC sp_executesql @sql;
 
-SET @sql = '
-GRANT SELECT ON msdb.dbo.backupset TO [' + @DMS_User + '];
-GRANT SELECT ON msdb.dbo.backupmediafamily TO [' + @DMS_User + '];
-GRANT SELECT ON msdb.dbo.backupfile TO [' + @DMS_User + '];';
+SET @sql =
+    'GRANT SELECT ON dbo.backupset TO ' + @QuotedUser + ';'
+  + 'GRANT SELECT ON dbo.backupmediafamily TO ' + @QuotedUser + ';'
+  + 'GRANT SELECT ON dbo.backupfile TO ' + @QuotedUser + ';';
 EXEC sp_executesql @sql;
 
 PRINT '  MSDB permissions granted.';
@@ -431,9 +442,9 @@ DECLARE @DMS_User NVARCHAR(128), @SourceDB NVARCHAR(128);
 SELECT @DMS_User = DMS_User, @SourceDB = SourceDB FROM #DMS_Config;
 DECLARE @sql NVARCHAR(MAX);
 
-SET @sql = 'USE [' + @SourceDB + ']; ' +
-    'IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = ''' + @DMS_User + ''') CREATE USER [' + @DMS_User + '] FOR LOGIN [' + @DMS_User + ']; ' +
-    'EXEC sp_addrolemember N''db_owner'', N''' + @DMS_User + ''';';
+SET @sql = 'USE ' + QUOTENAME(@SourceDB) + '; ' +
+    'IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = ''' + REPLACE(@DMS_User, '''', '''''') + ''') CREATE USER ' + QUOTENAME(@DMS_User) + ' FOR LOGIN ' + QUOTENAME(@DMS_User) + '; ' +
+    'IF IS_ROLEMEMBER(N''db_owner'', N''' + REPLACE(@DMS_User, '''', '''''') + ''') <> 1 ALTER ROLE db_owner ADD MEMBER ' + QUOTENAME(@DMS_User) + ';';
 EXEC sp_executesql @sql;
 
 PRINT '  db_owner role granted on [' + @SourceDB + '].';
@@ -461,6 +472,10 @@ PRINT '    - Certificate: [awsdms_rtm_dump_dblog_cert]';
 PRINT '    - Certificate: [awsdms_rtm_position_1st_timestamp_cert]';
 PRINT '    - Login: [awsdms_rtm_dump_dblog_login] (sysadmin via cert)';
 PRINT '    - Login: [awsdms_rtm_position_1st_timestamp_login] (sysadmin via cert)';
+PRINT '  Database users and verified grants applied:';
+PRINT '    - master: wrapper, log-read, replication, and visibility grants';
+PRINT '    - msdb: backup history SELECT grants';
+PRINT '    - source database: db_owner membership';
 PRINT '';
 PRINT '  IMPORTANT: Add this ECA to your DMS source endpoint:';
 PRINT '    enableNonSysadminWrapper=true;';

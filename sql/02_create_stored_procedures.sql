@@ -1,136 +1,192 @@
 -- =============================================================================
 -- 02_create_stored_procedures.sql
--- Creates the two wrapper stored procedures that AWS DMS calls for CDC
--- log reading instead of the raw system functions.
---
--- These procedures wrap:
---   fn_dump_dblog        -> awsdms.rtm_dump_dblog
---   fn_position_1st_timestamp -> awsdms.rtm_position_1st_timestamp
---
--- Usage:
---   sqlcmd -S <server> -i 02_create_stored_procedures.sql
+-- Creates the same version-aware DMS wrapper procedures as the tested
+-- all-in-one standalone setup.
 -- =============================================================================
 
 USE master;
 GO
 
--- Drop existing procedures if they exist
-IF OBJECT_ID('awsdms.rtm_dump_dblog', 'P') IS NOT NULL
+IF OBJECT_ID(N'awsdms.rtm_dump_dblog', N'P') IS NOT NULL
     DROP PROCEDURE awsdms.rtm_dump_dblog;
 GO
 
-IF OBJECT_ID('awsdms.rtm_position_1st_timestamp', 'P') IS NOT NULL
+DECLARE @parameter_count INT;
+DECLARE @default_count INT;
+DECLARE @defaults NVARCHAR(MAX) = N'';
+DECLARE @index INT = 1;
+DECLARE @sql NVARCHAR(MAX);
+
+SELECT @parameter_count = COUNT(*)
+FROM sys.all_parameters
+WHERE object_id = OBJECT_ID(N'sys.fn_dump_dblog');
+
+IF @parameter_count <= 5
+    THROW 51005, 'Unable to determine the fn_dump_dblog parameter count.', 1;
+
+SET @default_count = @parameter_count - 5;
+WHILE @index <= @default_count
+BEGIN
+    SET @defaults += CASE WHEN @index > 1 THEN N',' ELSE N'' END + N'default';
+    SET @index += 1;
+END
+
+SET @sql = N'
+CREATE PROCEDURE awsdms.rtm_dump_dblog
+(
+    @start_lsn VARCHAR(32),
+    @seqno INTEGER,
+    @filename VARCHAR(260),
+    @partition_list VARCHAR(8000),
+    @programmed_filtering INTEGER,
+    @minPartition BIGINT,
+    @maxPartition BIGINT
+)
+AS
+BEGIN
+    DECLARE @start_lsn_cmp VARCHAR(32);
+    SET NOCOUNT ON;
+    SET @start_lsn_cmp = @start_lsn;
+
+    IF @start_lsn_cmp IS NULL
+        SET @start_lsn_cmp = ''00000000:00000000:0000'';
+
+    IF @partition_list IS NULL
+    BEGIN
+        RAISERROR (''Null partition list was passed'', 16, 1);
+        RETURN;
+    END
+
+    IF @start_lsn IS NOT NULL
+        SET @start_lsn = ''0x'' + @start_lsn;
+
+    IF @programmed_filtering = 0
+    BEGIN
+        SELECT
+            [Current LSN], [operation], [Context], [Transaction ID], [Transaction Name],
+            [Begin Time], [End Time], [Flag Bits], [PartitionID], [Page ID], [Slot ID],
+            [RowLog Contents 0], [Log Record], [RowLog Contents 1]
+        FROM fn_dump_dblog (
+            @start_lsn, NULL, N''DISK'', @seqno, @filename,
+            ' + @defaults + N')
+        WHERE [Current LSN] COLLATE SQL_Latin1_General_CP1_CI_AS
+              > @start_lsn_cmp COLLATE SQL_Latin1_General_CP1_CI_AS
+          AND (
+              [operation] IN (''LOP_BEGIN_XACT'', ''LOP_COMMIT_XACT'', ''LOP_ABORT_XACT'')
+              OR (
+                  [operation] IN (''LOP_INSERT_ROWS'', ''LOP_DELETE_ROWS'', ''LOP_MODIFY_ROW'')
+                  AND (
+                      [context] IN (''LCX_HEAP'', ''LCX_CLUSTERED'', ''LCX_MARK_AS_GHOST'')
+                      OR ([context] = ''LCX_TEXT_MIX'' AND DATALENGTH([RowLog Contents 0]) IN (0, 1))
+                  )
+                  AND [PartitionID] IN (
+                      SELECT pid FROM master.awsdms.split_partition_list(@partition_list, '','')
+                  )
+              )
+              OR [operation] = ''LOP_HOBT_DDL''
+          );
+    END
+    ELSE
+    BEGIN
+        SELECT
+            [Current LSN], [operation], [Context], [Transaction ID], [Transaction Name],
+            [Begin Time], [End Time], [Flag Bits], [PartitionID], [Page ID], [Slot ID],
+            [RowLog Contents 0], [Log Record], [RowLog Contents 1]
+        FROM fn_dump_dblog (
+            @start_lsn, NULL, N''DISK'', @seqno, @filename,
+            ' + @defaults + N')
+        WHERE [Current LSN] COLLATE SQL_Latin1_General_CP1_CI_AS
+              > @start_lsn_cmp COLLATE SQL_Latin1_General_CP1_CI_AS
+          AND (
+              [operation] IN (''LOP_BEGIN_XACT'', ''LOP_COMMIT_XACT'', ''LOP_ABORT_XACT'')
+              OR (
+                  [operation] IN (''LOP_INSERT_ROWS'', ''LOP_DELETE_ROWS'', ''LOP_MODIFY_ROW'')
+                  AND (
+                      [context] IN (''LCX_HEAP'', ''LCX_CLUSTERED'', ''LCX_MARK_AS_GHOST'')
+                      OR ([context] = ''LCX_TEXT_MIX'' AND DATALENGTH([RowLog Contents 0]) IN (0, 1))
+                  )
+                  AND [PartitionID] IS NOT NULL
+                  AND [PartitionID] >= @minPartition
+                  AND [PartitionID] <= @maxPartition
+              )
+              OR [operation] = ''LOP_HOBT_DDL''
+          );
+    END
+
+    SET NOCOUNT OFF;
+END;';
+
+EXEC sys.sp_executesql @sql;
+PRINT 'Created awsdms.rtm_dump_dblog with '
+    + CAST(@default_count AS VARCHAR(10)) + ' version-specific default parameters.';
+GO
+
+IF OBJECT_ID(N'awsdms.rtm_position_1st_timestamp', N'P') IS NOT NULL
     DROP PROCEDURE awsdms.rtm_position_1st_timestamp;
 GO
 
--- Wrapper for fn_dump_dblog
--- DMS calls this to read transaction log records for CDC
-CREATE PROCEDURE awsdms.rtm_dump_dblog
-    @start_lsn        VARCHAR(32)  = NULL,
-    @end_lsn          VARCHAR(32)  = NULL,
-    @device_type      VARCHAR(260) = 'DISK',
-    @file_name_1      VARCHAR(260) = NULL,
-    @file_name_2      VARCHAR(260) = NULL,
-    @file_name_3      VARCHAR(260) = NULL,
-    @file_name_4      VARCHAR(260) = NULL,
-    @file_name_5      VARCHAR(260) = NULL,
-    @file_name_6      VARCHAR(260) = NULL,
-    @file_name_7      VARCHAR(260) = NULL,
-    @file_name_8      VARCHAR(260) = NULL,
-    @file_name_9      VARCHAR(260) = NULL,
-    @file_name_10     VARCHAR(260) = NULL,
-    @file_name_11     VARCHAR(260) = NULL,
-    @file_name_12     VARCHAR(260) = NULL,
-    @file_name_13     VARCHAR(260) = NULL,
-    @file_name_14     VARCHAR(260) = NULL,
-    @file_name_15     VARCHAR(260) = NULL,
-    @file_name_16     VARCHAR(260) = NULL,
-    @file_name_17     VARCHAR(260) = NULL,
-    @file_name_18     VARCHAR(260) = NULL,
-    @file_name_19     VARCHAR(260) = NULL,
-    @file_name_20     VARCHAR(260) = NULL,
-    @file_name_21     VARCHAR(260) = NULL,
-    @file_name_22     VARCHAR(260) = NULL,
-    @file_name_23     VARCHAR(260) = NULL,
-    @file_name_24     VARCHAR(260) = NULL,
-    @file_name_25     VARCHAR(260) = NULL,
-    @file_name_26     VARCHAR(260) = NULL,
-    @file_name_27     VARCHAR(260) = NULL,
-    @file_name_28     VARCHAR(260) = NULL,
-    @file_name_29     VARCHAR(260) = NULL,
-    @file_name_30     VARCHAR(260) = NULL,
-    @file_name_31     VARCHAR(260) = NULL,
-    @file_name_32     VARCHAR(260) = NULL,
-    @file_name_33     VARCHAR(260) = NULL,
-    @file_name_34     VARCHAR(260) = NULL,
-    @file_name_35     VARCHAR(260) = NULL,
-    @file_name_36     VARCHAR(260) = NULL,
-    @file_name_37     VARCHAR(260) = NULL,
-    @file_name_38     VARCHAR(260) = NULL,
-    @file_name_39     VARCHAR(260) = NULL,
-    @file_name_40     VARCHAR(260) = NULL,
-    @file_name_41     VARCHAR(260) = NULL,
-    @file_name_42     VARCHAR(260) = NULL,
-    @file_name_43     VARCHAR(260) = NULL,
-    @file_name_44     VARCHAR(260) = NULL,
-    @file_name_45     VARCHAR(260) = NULL,
-    @file_name_46     VARCHAR(260) = NULL,
-    @file_name_47     VARCHAR(260) = NULL,
-    @file_name_48     VARCHAR(260) = NULL,
-    @file_name_49     VARCHAR(260) = NULL,
-    @file_name_50     VARCHAR(260) = NULL,
-    @file_name_51     VARCHAR(260) = NULL,
-    @file_name_52     VARCHAR(260) = NULL,
-    @file_name_53     VARCHAR(260) = NULL,
-    @file_name_54     VARCHAR(260) = NULL,
-    @file_name_55     VARCHAR(260) = NULL,
-    @file_name_56     VARCHAR(260) = NULL,
-    @file_name_57     VARCHAR(260) = NULL,
-    @file_name_58     VARCHAR(260) = NULL,
-    @file_name_59     VARCHAR(260) = NULL,
-    @file_name_60     VARCHAR(260) = NULL,
-    @file_name_61     VARCHAR(260) = NULL,
-    @file_name_62     VARCHAR(260) = NULL,
-    @file_name_63     VARCHAR(260) = NULL,
-    @file_name_64     VARCHAR(260) = NULL
-AS
+DECLARE @parameter_count INT;
+DECLARE @default_count INT;
+DECLARE @defaults NVARCHAR(MAX) = N'';
+DECLARE @index INT = 1;
+DECLARE @sql NVARCHAR(MAX);
+
+SELECT @parameter_count = COUNT(*)
+FROM sys.all_parameters
+WHERE object_id = OBJECT_ID(N'sys.fn_dump_dblog');
+
+IF @parameter_count <= 5
+    THROW 51006, 'Unable to determine the fn_dump_dblog parameter count.', 1;
+
+SET @default_count = @parameter_count - 5;
+WHILE @index <= @default_count
 BEGIN
-    SET NOCOUNT ON;
-
-    SELECT * FROM fn_dump_dblog(
-        @start_lsn, @end_lsn, @device_type,
-        @file_name_1,  @file_name_2,  @file_name_3,  @file_name_4,
-        @file_name_5,  @file_name_6,  @file_name_7,  @file_name_8,
-        @file_name_9,  @file_name_10, @file_name_11, @file_name_12,
-        @file_name_13, @file_name_14, @file_name_15, @file_name_16,
-        @file_name_17, @file_name_18, @file_name_19, @file_name_20,
-        @file_name_21, @file_name_22, @file_name_23, @file_name_24,
-        @file_name_25, @file_name_26, @file_name_27, @file_name_28,
-        @file_name_29, @file_name_30, @file_name_31, @file_name_32,
-        @file_name_33, @file_name_34, @file_name_35, @file_name_36,
-        @file_name_37, @file_name_38, @file_name_39, @file_name_40,
-        @file_name_41, @file_name_42, @file_name_43, @file_name_44,
-        @file_name_45, @file_name_46, @file_name_47, @file_name_48,
-        @file_name_49, @file_name_50, @file_name_51, @file_name_52,
-        @file_name_53, @file_name_54, @file_name_55, @file_name_56,
-        @file_name_57, @file_name_58, @file_name_59, @file_name_60,
-        @file_name_61, @file_name_62, @file_name_63, @file_name_64
-    );
+    SET @defaults += CASE WHEN @index > 1 THEN N',' ELSE N'' END + N'default';
+    SET @index += 1;
 END
-GO
 
--- Wrapper for fn_position_1st_timestamp
--- DMS calls this to find the starting LSN for a given timestamp
+SET @sql = N'
 CREATE PROCEDURE awsdms.rtm_position_1st_timestamp
-    @db_name   SYSNAME,
-    @timestamp DATETIME
+(
+    @dbname SYSNAME,
+    @seqno INTEGER,
+    @filename VARCHAR(260),
+    @1stTimeStamp VARCHAR(40)
+)
 AS
 BEGIN
     SET NOCOUNT ON;
 
-    SELECT fn_position_1st_timestamp(@db_name, @timestamp);
-END
+    DECLARE @firstMatching TABLE (cLsn VARCHAR(32), bTim DATETIME);
+    DECLARE @statement NVARCHAR(4000);
+    DECLARE @newline CHAR(2) = CHAR(10);
+    DECLARE @tab CHAR(2) = CHAR(9);
+    DECLARE @filename_variable NVARCHAR(254) = ''NULL'';
+
+    IF @filename IS NOT NULL
+        SET @filename_variable = '''''''' + @filename + '''''''';
+
+    SET @statement = ''USE '' + QUOTENAME(@dbname) + '';
+SELECT TOP (1) [Current LSN], [Begin Time]
+FROM fn_dump_dblog (NULL, NULL, NULL, '' + CAST(@seqno AS VARCHAR(10)) + '',''
+        + @filename_variable + '','' + @newline + @tab + ''' + @defaults + N')
+WHERE [operation] = ''''LOP_BEGIN_XACT''''
+  AND [Begin Time] >= CAST('''''''' + @1stTimeStamp + '''''''' AS DATETIME);'';
+
+    INSERT INTO @firstMatching
+        EXEC sys.sp_executesql @statement;
+
+    SELECT TOP (1)
+        cLsn AS [matching LSN],
+        CONVERT(VARCHAR, bTim, 121) AS [matching Timestamp]
+    FROM @firstMatching;
+
+    SET NOCOUNT OFF;
+END;';
+
+EXEC sys.sp_executesql @sql;
+PRINT 'Created awsdms.rtm_position_1st_timestamp using fn_dump_dblog timestamp positioning.';
 GO
 
-PRINT '02 - Stored procedures created successfully.';
+PRINT '02 - Version-aware wrapper procedures created.';
 GO

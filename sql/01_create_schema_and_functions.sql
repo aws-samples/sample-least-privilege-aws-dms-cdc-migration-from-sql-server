@@ -1,37 +1,45 @@
 -- =============================================================================
 -- 01_create_schema_and_functions.sql
--- Creates the awsdms schema and heartbeat function in the master database.
---
--- Usage:
---   sqlcmd -S <server> -i 01_create_schema_and_functions.sql -v DMS_USER="dmsnosysadmin"
---
--- SQLCMD Variables:
---   DMS_USER  - The DMS login name (default: dmsnosysadmin)
+-- Creates the awsdms schema and split_partition_list table-valued function in
+-- master. This matches the tested all-in-one standalone setup.
 -- =============================================================================
 
 USE master;
 GO
 
--- Create the awsdms schema if it does not exist
-IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'awsdms')
-BEGIN
-    EXEC('CREATE SCHEMA [awsdms] AUTHORIZATION [dbo]');
-END
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'awsdms')
+    EXEC(N'CREATE SCHEMA [awsdms] AUTHORIZATION [dbo]');
 GO
 
--- Create or replace the heartbeat function
--- DMS uses this to track replication health
-IF OBJECT_ID('awsdms.rtm_heartbeat_function', 'FN') IS NOT NULL
-    DROP FUNCTION awsdms.rtm_heartbeat_function;
+IF OBJECT_ID(N'awsdms.split_partition_list', N'TF') IS NOT NULL
+    DROP FUNCTION awsdms.split_partition_list;
 GO
 
-CREATE FUNCTION awsdms.rtm_heartbeat_function()
-RETURNS DATETIME
+CREATE FUNCTION awsdms.split_partition_list
+(
+    @plist VARCHAR(8000),
+    @dlm NVARCHAR(1)
+)
+RETURNS @partitions TABLE (pid BIGINT PRIMARY KEY)
 AS
 BEGIN
-    RETURN GETUTCDATE();
+    DECLARE @partition_id BIGINT;
+    DECLARE @delimiter_position INT;
+    DECLARE @delimiter_length INT = LEN(@dlm);
+
+    WHILE CHARINDEX(@dlm, @plist) > 0
+    BEGIN
+        SET @delimiter_position = CHARINDEX(@dlm, @plist);
+        SET @partition_id = CAST(LTRIM(RTRIM(SUBSTRING(@plist, 1, @delimiter_position - 1))) AS BIGINT);
+        INSERT INTO @partitions (pid) VALUES (@partition_id);
+        SET @plist = SUBSTRING(@plist, @delimiter_position + @delimiter_length, LEN(@plist));
+    END
+
+    SET @partition_id = CAST(LTRIM(RTRIM(@plist)) AS BIGINT);
+    INSERT INTO @partitions (pid) VALUES (@partition_id);
+    RETURN;
 END
 GO
 
-PRINT '01 - Schema and functions created successfully.';
+PRINT '01 - awsdms schema and split_partition_list function created.';
 GO

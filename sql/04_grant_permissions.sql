@@ -1,78 +1,68 @@
 -- =============================================================================
 -- 04_grant_permissions.sql
--- Grants all granular permissions to the DMS user account.
+-- Applies the verified minimum working permissions for a non-sysadmin AWS DMS
+-- endpoint login.
 --
--- Usage:
---   sqlcmd -S <server> -i 04_grant_permissions.sql \
---     -v DMS_USER="dmsnosysadmin" DB_NAME="<your-database>"
---
--- SQLCMD Variables:
---   DMS_USER - The DMS login name
---   DB_NAME  - The source database name to replicate
+-- Run from the repository root:
+--   sqlcmd -S <server> -i sql/04_grant_permissions.sql \
+--     -v DMS_USER="dmsnosysadmin" DB_NAME="<source-database>"
 -- =============================================================================
 
 USE master;
 GO
 
--- Create the DMS login if it does not exist
-IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = '$(DMS_USER)')
+DECLARE @dms_user SYSNAME = N'$(DMS_USER)';
+DECLARE @source_database SYSNAME = N'$(DB_NAME)';
+DECLARE @quoted_user NVARCHAR(258) = QUOTENAME(@dms_user);
+DECLARE @quoted_database NVARCHAR(258) = QUOTENAME(@source_database);
+DECLARE @sql NVARCHAR(MAX);
+
+IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = @dms_user)
+    THROW 51020, 'The DMS server login does not exist. Create it before running this script.', 1;
+
+IF DB_ID(@source_database) IS NULL
+    THROW 51021, 'The specified source database does not exist.', 1;
+
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = @dms_user)
 BEGIN
-    PRINT 'ERROR: Login $(DMS_USER) does not exist. Create it first.';
-    RAISERROR('Login $(DMS_USER) not found.', 16, 1);
-    RETURN;
+    SET @sql = N'CREATE USER ' + @quoted_user + N' FOR LOGIN ' + @quoted_user + N';';
+    EXEC sys.sp_executesql @sql;
 END
-GO
 
--- Server-level permissions
-GRANT VIEW SERVER STATE TO [$(DMS_USER)];
-GO
-GRANT VIEW ANY DEFINITION TO [$(DMS_USER)];
-GO
+SET @sql =
+    N'GRANT VIEW SERVER STATE TO ' + @quoted_user + N';'
+  + N'GRANT VIEW ANY DEFINITION TO ' + @quoted_user + N';'
+  + N'GRANT SELECT ON sys.fn_dblog TO ' + @quoted_user + N';'
+  + N'GRANT EXECUTE ON sys.sp_repldone TO ' + @quoted_user + N';'
+  + N'GRANT EXECUTE ON sys.sp_replincrementlsn TO ' + @quoted_user + N';'
+  + N'GRANT EXECUTE ON sys.sp_addpublication TO ' + @quoted_user + N';'
+  + N'GRANT EXECUTE ON sys.sp_addarticle TO ' + @quoted_user + N';'
+  + N'GRANT EXECUTE ON sys.sp_articlefilter TO ' + @quoted_user + N';'
+  + N'GRANT SELECT ON awsdms.split_partition_list TO ' + @quoted_user + N';'
+  + N'GRANT EXECUTE ON awsdms.rtm_dump_dblog TO ' + @quoted_user + N';'
+  + N'GRANT EXECUTE ON awsdms.rtm_position_1st_timestamp TO ' + @quoted_user + N';';
+EXEC sys.sp_executesql @sql;
 
--- master database permissions
-GRANT SELECT ON awsdms.rtm_heartbeat_function TO [$(DMS_USER)];
-GO
-GRANT EXECUTE ON awsdms.rtm_dump_dblog TO [$(DMS_USER)];
-GO
-GRANT EXECUTE ON awsdms.rtm_position_1st_timestamp TO [$(DMS_USER)];
-GO
+SET @sql = N'USE ' + @quoted_database + N';'
+  + N'IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'''
+  + REPLACE(@dms_user, N'''', N'''''') + N''') '
+  + N'CREATE USER ' + @quoted_user + N' FOR LOGIN ' + @quoted_user + N';'
+  + N'IF IS_ROLEMEMBER(N''db_owner'', N''' + REPLACE(@dms_user, N'''', N''''''') + N''') <> 1 '
+  + N'ALTER ROLE db_owner ADD MEMBER ' + @quoted_user + N';';
+EXEC sys.sp_executesql @sql;
 
--- Source database permissions
-USE [$(DB_NAME)];
-GO
+SET @sql = N'USE msdb;'
+  + N'IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'''
+  + REPLACE(@dms_user, N'''', N'''''') + N''') '
+  + N'CREATE USER ' + @quoted_user + N' FOR LOGIN ' + @quoted_user + N';'
+  + N'GRANT SELECT ON dbo.backupset TO ' + @quoted_user + N';'
+  + N'GRANT SELECT ON dbo.backupmediafamily TO ' + @quoted_user + N';'
+  + N'GRANT SELECT ON dbo.backupfile TO ' + @quoted_user + N';';
+EXEC sys.sp_executesql @sql;
 
--- Add DMS user as db_owner on the source database
-IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = '$(DMS_USER)')
-BEGIN
-    CREATE USER [$(DMS_USER)] FOR LOGIN [$(DMS_USER)];
-END
-GO
-
-ALTER ROLE db_owner ADD MEMBER [$(DMS_USER)];
-GO
-
--- msdb permissions (required for CDC position tracking)
-USE msdb;
-GO
-
-IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = '$(DMS_USER)')
-BEGIN
-    CREATE USER [$(DMS_USER)] FOR LOGIN [$(DMS_USER)];
-END
-GO
-
-GRANT SELECT ON dbo.sysjobs TO [$(DMS_USER)];
-GO
-GRANT SELECT ON dbo.sysjobactivity TO [$(DMS_USER)];
-GO
-
--- Verify: DMS user should NOT be sysadmin
-USE master;
-GO
 SELECT
-    '$(DMS_USER)' AS login_name,
-    IS_SRVROLEMEMBER('sysadmin', '$(DMS_USER)') AS is_sysadmin;
-GO
+    @dms_user AS login_name,
+    IS_SRVROLEMEMBER(N'sysadmin', @dms_user) AS is_sysadmin;
 
-PRINT '04 - Granular permissions granted successfully.';
+PRINT '04 - Verified non-sysadmin permissions granted.';
 GO

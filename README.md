@@ -1,63 +1,170 @@
 # Run Least-Privilege AWS DMS CDC Migration from SQL Server
 
-> **Disclaimer:** This is sample code, for non-production usage. You should work with
-> your security and legal teams to meet your organizational security, regulatory and
-> compliance requirements before deployment.
+This sample supports the AWS Database Blog walkthrough for running AWS Database Migration Service (AWS DMS) change data capture (CDC) from a self-managed SQL Server source without granting `sysadmin` to the DMS endpoint login.
 
-Sample code accompanying the AWS Database Blog post *Run Least-Privilege AWS DMS CDC
-Migration from SQL Server*. It configures AWS Database Migration Service (AWS DMS)
-change data capture (CDC) from a SQL Server source **without granting sysadmin** to the
-DMS user account, using SQL Server certificate-based code signing and AWS Secrets Manager.
+The tested implementation uses SQL Server certificate-signed wrapper procedures. The DMS login receives the verified minimum working permissions, while two non-interactive certificate logins activate `sysadmin` only while the signed modules execute.
 
-## Contents
+## Repository contents
 
 | Path | Purpose |
-|------|---------|
-| `dms_setup_standalone_nonsysadmin.sql` | All-in-one setup script for standalone SQL Server (version-aware; auto-detects `fn_dump_dblog` parameters for SQL Server 2016–2022) |
-| `sql/01_create_schema_and_functions.sql` | Creates the `awsdms` schema and heartbeat helper function |
-| `sql/02_create_stored_procedures.sql` | Wrapper procedures for `fn_dump_dblog` and `fn_position_1st_timestamp` |
-| `sql/03_create_certificates_and_sign.sql` | Certificates, certificate-based logins, and `ADD SIGNATURE` |
-| `sql/04_grant_permissions.sql` | Granular grants for the non-sysadmin DMS user |
-| `sql/05_ag_replica_setup.sql` | Always On AG replica setup (SID-consistent login, per-replica certificates) |
-| `cloudformation/dms-nonsysadmin-secrets.yaml` | Secrets Manager secrets and scoped IAM role for the DMS endpoint |
-| `cleanup/remove_nonsysadmin_setup.sql` | Removes all objects in dependency order |
+|---|---|
+| `sql/00_configure_replication.sql` | Configures distribution, a DMS-compatible publication, and filtered articles for primary-key tables |
+| `dms_setup_standalone_nonsysadmin.sql` | All-in-one, version-aware standalone SQL Server setup |
+| `sql/01_create_schema_and_functions.sql` | Creates `awsdms.split_partition_list` |
+| `sql/02_create_stored_procedures.sql` | Creates the same version-aware wrappers as the all-in-one setup |
+| `sql/03_create_certificates_and_sign.sql` | Creates the canonical certificates/logins and signs the wrappers |
+| `sql/04_grant_permissions.sql` | Applies the verified master, msdb, source database, and server grants |
+| `sql/05_ag_replica_setup.sql` | Validates/creates the matched-SID AG login, then reuses scripts 01-04 |
+| `cloudformation/dms-nonsysadmin-secrets.yaml` | Creates KMS-encrypted secrets and the regional DMS service role |
+| `cleanup/remove_nonsysadmin_setup.sql` | Removes canonical wrapper objects, certificate logins, and grants |
 
-## Usage
+## Prerequisites
 
-**Option A — All-in-one script (standalone SQL Server):**
+- A self-managed SQL Server source version supported by AWS DMS, using full or bulk-logged recovery
+- A SQL Server login dedicated to the DMS endpoint; the standalone setup validates that it already exists
+- `sysadmin` access for the one-time distribution, publication, certificate, and signing setup
+- SQLCMD for the modular and cleanup commands
+- An AWS DMS replication instance that can reach the SQL Server source and AWS Secrets Manager
+- For a private DMS instance without internet egress, a Secrets Manager interface VPC endpoint with private DNS and TCP 443 access from the DMS security group
 
-1. Open `dms_setup_standalone_nonsysadmin.sql` and set the three `CHANGE ME` values
-   (DMS login, source database, certificate password). Never commit or reuse the
-   placeholder password.
-2. Run the script as sysadmin. It auto-detects your SQL Server version and creates all
-   objects, certificates, signatures, and grants in one pass.
+DMS endpoint passwords cannot contain semicolon (`;`), plus (`+`), or percent (`%`) characters.
 
-**Option B — Step-by-step scripts:**
+## Quick start
 
-1. Run the SQL scripts in order (01 → 04) against the `master` database on your source
-   SQL Server instance. Pass certificate passwords as SQLCMD variables — never hardcode them.
-2. For Always On AG environments, additionally run `05_ag_replica_setup.sql` on every replica.
+### 1. Configure SQL Server replication
 
-**Then, for both options:**
+Run from the repository root and source database context:
 
-3. If your source endpoint uses AWS Secrets Manager for credentials (recommended for
-   sources reachable from AWS), deploy the CloudFormation template to create the secrets
-   and IAM role. For on-premises sources where you supply credentials directly on the
-   DMS endpoint, the CloudFormation template is optional.
-4. Create the DMS source endpoint with the `enableNonSysadminWrapper=true;` extra
-   connection attribute.
+```bash
+sqlcmd -S <server> -d <source-database> \
+  -i sql/00_configure_replication.sql \
+  -v REPLDATA_DIR="C:\Program Files\Microsoft SQL Server\MSSQL\ReplData" \
+     CREATE_PUBLICATION="1"
+```
 
-See the blog post for the full walkthrough, validation steps, and limitations. For the
-authoritative procedure definitions, see
-[Using a non-sysadmin user with AWS DMS](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Source.SQLServer.html#CHAP_Source.SQLServer.Configuration.nonsysadmin).
+The script configures the instance as its own distributor when needed, creates a continuous anonymous publication, and adds primary-key user tables as log-based articles with the deliberate `(1=0)` filter. Run this command on a standalone source or the AG primary. Script 05 runs the same file with `CREATE_PUBLICATION=0` to configure distribution on each AG secondary without creating duplicate publication state. Tables without primary keys are not added; configure MS-CDC separately if you need to capture them.
+
+### 2. Deploy Secrets Manager resources
+
+```bash
+aws cloudformation deploy \
+  --template-file cloudformation/dms-nonsysadmin-secrets.yaml \
+  --stack-name dms-nonsysadmin-secrets \
+  --parameter-overrides \
+      DMSUsername=dmsnosysadmin \
+      DMSPassword=<endpoint-password-without-semicolon-plus-percent> \
+      SQLServerHost=<sql-server-host-or-ag-listener> \
+      CertPassword=<certificate-password> \
+  --capabilities CAPABILITY_IAM
+```
+
+The DMS role trusts both `dms.amazonaws.com` and the Region-specific principal `dms.<region>.amazonaws.com`. It can read only the endpoint credential secret. The certificate password secret remains operator-only.
+
+For an on-premises source whose policy prohibits cloud-stored credentials, skip this template and provide the credentials directly when you create the DMS endpoint.
+
+### 3. Configure the non-sysadmin wrappers
+
+Choose one setup path.
+
+**Option A - all-in-one standalone setup:** edit the three `CHANGE ME` values in `dms_setup_standalone_nonsysadmin.sql`, then run it as `sysadmin`.
+
+```bash
+sqlcmd -S <server> -i dms_setup_standalone_nonsysadmin.sql
+```
+
+**Option B - modular standalone setup:** run scripts 01-04 in order from the repository root. Both paths create the same helper, procedure contracts, canonical object names, signatures, and verified grants.
+
+```bash
+sqlcmd -S <server> -i sql/01_create_schema_and_functions.sql
+sqlcmd -S <server> -i sql/02_create_stored_procedures.sql
+sqlcmd -S <server> -i sql/03_create_certificates_and_sign.sql \
+  -v CERT_PASSWORD="<certificate-password>"
+sqlcmd -S <server> -i sql/04_grant_permissions.sql \
+  -v DMS_USER="dmsnosysadmin" DB_NAME="<source-database>"
+```
+
+### 4. Configure each Always On AG replica
+
+Get the login SID from the primary:
+
+```sql
+SELECT CONVERT(VARCHAR(200), sid, 1) AS primary_sid
+FROM sys.server_principals
+WHERE name = N'dmsnosysadmin';
+```
+
+Then run the AG script from the repository root on each replica:
+
+```bash
+sqlcmd -S <replica-server> -i sql/05_ag_replica_setup.sql \
+  -v DMS_USER="dmsnosysadmin" \
+     DMS_PASSWORD="<endpoint-password>" \
+     PRIMARY_SID="0x..." \
+     CERT_PASSWORD="<certificate-password>" \
+     DB_NAME="<source-database>" \
+     REPLDATA_DIR="C:\Program Files\Microsoft SQL Server\MSSQL\ReplData"
+```
+
+The AG script configures distribution locally on the replica, validates or creates the matched-SID login, and reuses canonical scripts 01-04. Run the Step 1 publication command once on the primary with `CREATE_PUBLICATION=1`; script 05 uses distribution-only mode on secondaries.
+
+### 5. Create the DMS source endpoint
+
+```bash
+aws dms create-endpoint \
+  --endpoint-identifier sqlserver-source \
+  --endpoint-type source \
+  --engine-name sqlserver \
+  --secrets-manager-secret-id <endpoint-secret-arn> \
+  --secrets-manager-access-role-arn <dms-role-arn> \
+  --extra-connection-attributes "enableNonSysadminWrapper=true;"
+```
+
+## Validation
+
+Verify that the DMS login has no `sysadmin` membership:
+
+```sql
+SELECT IS_SRVROLEMEMBER(N'sysadmin', N'dmsnosysadmin') AS is_sysadmin;
+```
+
+Expected output: `0`.
+
+After starting CDC, the `SOURCE_CAPTURE` task log should contain these object checks:
+
+```text
+Object ('awsdms','split_partition_list','TF') exists at MASTER
+Object ('awsdms','rtm_dump_dblog','P') exists at MASTER
+```
+
+## Cleanup
+
+The cleanup removes both canonical certificate-based sysadmin logins, their certificates and signatures, the wrapper procedures, `split_partition_list`, and the exact grants applied by this sample. It never drops the pre-existing DMS server login or shared distribution configuration.
+
+On a standalone source or AG primary, remove the sample publication and source-database grants:
+
+```bash
+sqlcmd -S <server> -i cleanup/remove_nonsysadmin_setup.sql \
+  -v DMS_USER="dmsnosysadmin" DB_NAME="<source-database>" \
+     REMOVE_DMS_USERS="1" CLEAN_SOURCE_DATABASE="1" REMOVE_PUBLICATION="1"
+```
+
+On every AG secondary, remove local wrappers, certificate logins, and `master`/`msdb` grants without modifying the read-only source database:
+
+```bash
+sqlcmd -S <replica-server> -i cleanup/remove_nonsysadmin_setup.sql \
+  -v DMS_USER="dmsnosysadmin" DB_NAME="<source-database>" \
+     REMOVE_DMS_USERS="1" CLEAN_SOURCE_DATABASE="0" REMOVE_PUBLICATION="0"
+```
+
+Use `REMOVE_DMS_USERS="0"` if the database users predated this walkthrough or support another workload.
 
 ## Security
 
-These scripts grant sysadmin to certificate-based logins only. The certificate logins
-have no password and cannot establish a session. Store all passwords in AWS Secrets Manager.
-
-See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for reporting security issues.
+- The DMS endpoint login has no elevated server role membership.
+- Certificate-based logins are non-interactive and activate their permissions only inside signed procedures.
+- The DMS IAM role reads only the endpoint credential secret and decrypts only through regional Secrets Manager.
+- All secrets use a customer managed KMS key with rotation enabled.
 
 ## License
 
-This library is licensed under the MIT-0 License. See the [LICENSE](LICENSE) file.
+This sample is licensed under the MIT-0 License. See [LICENSE](LICENSE).

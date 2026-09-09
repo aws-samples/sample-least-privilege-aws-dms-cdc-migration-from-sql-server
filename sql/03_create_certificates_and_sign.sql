@@ -1,118 +1,127 @@
 -- =============================================================================
 -- 03_create_certificates_and_sign.sql
--- Creates certificates, certificate-based logins, adds them to sysadmin,
--- and signs the wrapper stored procedures.
+-- Creates canonical certificate-based logins, grants their narrowly activated
+-- sysadmin membership, and signs both wrapper procedures.
 --
--- IMPORTANT: Certificate passwords must NOT be hardcoded. Retrieve them
--- from AWS Secrets Manager and pass via SQLCMD variables.
---
--- Usage:
---   sqlcmd -S <server> -i 03_create_certificates_and_sign.sql \
---     -v CERT_PASSWORD_1="<password-from-secrets-manager>" \
---        CERT_PASSWORD_2="<password-from-secrets-manager>"
---
--- SQLCMD Variables:
---   CERT_PASSWORD_1 - Encryption password for rtm_dump_dblog certificate
---   CERT_PASSWORD_2 - Encryption password for rtm_position certificate
+-- Run from the repository root:
+--   sqlcmd -S <server> -i sql/03_create_certificates_and_sign.sql \
+--     -v CERT_PASSWORD="<password-from-secrets-manager>"
 -- =============================================================================
 
 USE master;
 GO
 
--- ---- Certificate for rtm_dump_dblog ----
+DECLARE @certificate_password NVARCHAR(128) = N'$(CERT_PASSWORD)';
+IF NULLIF(@certificate_password, N'') IS NULL OR @certificate_password = N'CHANGE_ME'
+    THROW 51010, 'Set CERT_PASSWORD to the certificate password retrieved from Secrets Manager.', 1;
 
--- Drop existing objects if they exist (idempotent)
-IF EXISTS (SELECT 1 FROM sys.certificates WHERE name = 'cert_rtm_dump_dblog')
+IF OBJECT_ID('tempdb..#CertificateConfig') IS NOT NULL DROP TABLE #CertificateConfig;
+CREATE TABLE #CertificateConfig (certificate_password NVARCHAR(128) NOT NULL);
+INSERT INTO #CertificateConfig VALUES (@certificate_password);
+GO
+
+-- Remove prior canonical signing identities before recreating them.
+IF EXISTS (SELECT 1 FROM sys.certificates WHERE name = N'awsdms_rtm_dump_dblog_cert')
 BEGIN
-    -- Remove signature first
-    IF EXISTS (
-        SELECT 1 FROM sys.crypt_properties cp
-        JOIN sys.certificates c ON cp.thumbprint = c.thumbprint
-        WHERE c.name = 'cert_rtm_dump_dblog'
-          AND cp.major_id = OBJECT_ID('awsdms.rtm_dump_dblog')
-    )
-    BEGIN
-        EXEC('DROP SIGNATURE FROM awsdms.rtm_dump_dblog BY CERTIFICATE cert_rtm_dump_dblog');
-    END
-
-    IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = 'login_cert_rtm_dump_dblog')
-    BEGIN
-        EXEC sp_dropsrvrolemember 'login_cert_rtm_dump_dblog', 'sysadmin';
-        DROP LOGIN login_cert_rtm_dump_dblog;
-    END
-
-    DROP CERTIFICATE cert_rtm_dump_dblog;
+    IF OBJECT_ID(N'awsdms.rtm_dump_dblog', N'P') IS NOT NULL
+       AND EXISTS (
+           SELECT 1 FROM sys.crypt_properties AS cp
+           JOIN sys.certificates AS c ON c.thumbprint = cp.thumbprint
+           WHERE c.name = N'awsdms_rtm_dump_dblog_cert'
+             AND cp.major_id = OBJECT_ID(N'awsdms.rtm_dump_dblog')
+       )
+        DROP SIGNATURE FROM awsdms.rtm_dump_dblog BY CERTIFICATE awsdms_rtm_dump_dblog_cert;
 END
 GO
 
-CREATE CERTIFICATE cert_rtm_dump_dblog
-    ENCRYPTION BY PASSWORD = '$(CERT_PASSWORD_1)'
-    WITH SUBJECT = 'Certificate for signing awsdms.rtm_dump_dblog';
-GO
-
-CREATE LOGIN login_cert_rtm_dump_dblog FROM CERTIFICATE cert_rtm_dump_dblog;
-GO
-
-ALTER SERVER ROLE sysadmin ADD MEMBER login_cert_rtm_dump_dblog;
-GO
-
-ADD SIGNATURE TO awsdms.rtm_dump_dblog
-    BY CERTIFICATE cert_rtm_dump_dblog
-    WITH PASSWORD = '$(CERT_PASSWORD_1)';
-GO
-
--- ---- Certificate for rtm_position_1st_timestamp ----
-
-IF EXISTS (SELECT 1 FROM sys.certificates WHERE name = 'cert_rtm_position')
+IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'awsdms_rtm_dump_dblog_login')
 BEGIN
-    IF EXISTS (
-        SELECT 1 FROM sys.crypt_properties cp
-        JOIN sys.certificates c ON cp.thumbprint = c.thumbprint
-        WHERE c.name = 'cert_rtm_position'
-          AND cp.major_id = OBJECT_ID('awsdms.rtm_position_1st_timestamp')
-    )
-    BEGIN
-        EXEC('DROP SIGNATURE FROM awsdms.rtm_position_1st_timestamp BY CERTIFICATE cert_rtm_position');
-    END
-
-    IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = 'login_cert_rtm_position')
-    BEGIN
-        EXEC sp_dropsrvrolemember 'login_cert_rtm_position', 'sysadmin';
-        DROP LOGIN login_cert_rtm_position;
-    END
-
-    DROP CERTIFICATE cert_rtm_position;
+    ALTER SERVER ROLE sysadmin DROP MEMBER awsdms_rtm_dump_dblog_login;
+    DROP LOGIN awsdms_rtm_dump_dblog_login;
 END
 GO
 
-CREATE CERTIFICATE cert_rtm_position
-    ENCRYPTION BY PASSWORD = '$(CERT_PASSWORD_2)'
-    WITH SUBJECT = 'Certificate for signing awsdms.rtm_position_1st_timestamp';
+IF EXISTS (SELECT 1 FROM sys.certificates WHERE name = N'awsdms_rtm_dump_dblog_cert')
+    DROP CERTIFICATE awsdms_rtm_dump_dblog_cert;
 GO
 
-CREATE LOGIN login_cert_rtm_position FROM CERTIFICATE cert_rtm_position;
+DECLARE @password NVARCHAR(128) = (SELECT certificate_password FROM #CertificateConfig);
+DECLARE @escaped_password NVARCHAR(256) = REPLACE(@password, N'''', N'''''''');
+EXEC(N'CREATE CERTIFICATE awsdms_rtm_dump_dblog_cert '
+    + N'ENCRYPTION BY PASSWORD = N''' + @escaped_password + N''' '
+    + N'WITH SUBJECT = N''Certificate for FN_DUMP_DBLOG permissions'';');
 GO
 
-ALTER SERVER ROLE sysadmin ADD MEMBER login_cert_rtm_position;
+CREATE LOGIN awsdms_rtm_dump_dblog_login
+    FROM CERTIFICATE awsdms_rtm_dump_dblog_cert;
+ALTER SERVER ROLE sysadmin ADD MEMBER awsdms_rtm_dump_dblog_login;
 GO
 
-ADD SIGNATURE TO awsdms.rtm_position_1st_timestamp
-    BY CERTIFICATE cert_rtm_position
-    WITH PASSWORD = '$(CERT_PASSWORD_2)';
+DECLARE @password NVARCHAR(128) = (SELECT certificate_password FROM #CertificateConfig);
+DECLARE @escaped_password NVARCHAR(256) = REPLACE(@password, N'''', N'''''''');
+EXEC(N'ADD SIGNATURE TO awsdms.rtm_dump_dblog '
+    + N'BY CERTIFICATE awsdms_rtm_dump_dblog_cert '
+    + N'WITH PASSWORD = N''' + @escaped_password + N''';');
 GO
 
--- ---- Verify signatures ----
+IF EXISTS (SELECT 1 FROM sys.certificates WHERE name = N'awsdms_rtm_position_1st_timestamp_cert')
+BEGIN
+    IF OBJECT_ID(N'awsdms.rtm_position_1st_timestamp', N'P') IS NOT NULL
+       AND EXISTS (
+           SELECT 1 FROM sys.crypt_properties AS cp
+           JOIN sys.certificates AS c ON c.thumbprint = cp.thumbprint
+           WHERE c.name = N'awsdms_rtm_position_1st_timestamp_cert'
+             AND cp.major_id = OBJECT_ID(N'awsdms.rtm_position_1st_timestamp')
+       )
+        DROP SIGNATURE FROM awsdms.rtm_position_1st_timestamp
+            BY CERTIFICATE awsdms_rtm_position_1st_timestamp_cert;
+END
+GO
+
+IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'awsdms_rtm_position_1st_timestamp_login')
+BEGIN
+    ALTER SERVER ROLE sysadmin DROP MEMBER awsdms_rtm_position_1st_timestamp_login;
+    DROP LOGIN awsdms_rtm_position_1st_timestamp_login;
+END
+GO
+
+IF EXISTS (SELECT 1 FROM sys.certificates WHERE name = N'awsdms_rtm_position_1st_timestamp_cert')
+    DROP CERTIFICATE awsdms_rtm_position_1st_timestamp_cert;
+GO
+
+DECLARE @password NVARCHAR(128) = (SELECT certificate_password FROM #CertificateConfig);
+DECLARE @escaped_password NVARCHAR(256) = REPLACE(@password, N'''', N'''''''');
+EXEC(N'CREATE CERTIFICATE awsdms_rtm_position_1st_timestamp_cert '
+    + N'ENCRYPTION BY PASSWORD = N''' + @escaped_password + N''' '
+    + N'WITH SUBJECT = N''Certificate for first timestamp positioning permissions'';');
+GO
+
+CREATE LOGIN awsdms_rtm_position_1st_timestamp_login
+    FROM CERTIFICATE awsdms_rtm_position_1st_timestamp_cert;
+ALTER SERVER ROLE sysadmin ADD MEMBER awsdms_rtm_position_1st_timestamp_login;
+GO
+
+DECLARE @password NVARCHAR(128) = (SELECT certificate_password FROM #CertificateConfig);
+DECLARE @escaped_password NVARCHAR(256) = REPLACE(@password, N'''', N'''''''');
+EXEC(N'ADD SIGNATURE TO awsdms.rtm_position_1st_timestamp '
+    + N'BY CERTIFICATE awsdms_rtm_position_1st_timestamp_cert '
+    + N'WITH PASSWORD = N''' + @escaped_password + N''';');
+GO
+
+DROP TABLE #CertificateConfig;
+GO
+
 SELECT
-    OBJECT_NAME(cp.major_id) AS signed_procedure,
+    OBJECT_SCHEMA_NAME(cp.major_id) + N'.' + OBJECT_NAME(cp.major_id) AS signed_procedure,
     c.name AS certificate_name,
     cp.crypt_type_desc
-FROM sys.crypt_properties cp
-JOIN sys.certificates c ON cp.thumbprint = c.thumbprint
+FROM sys.crypt_properties AS cp
+JOIN sys.certificates AS c ON c.thumbprint = cp.thumbprint
 WHERE cp.major_id IN (
-    OBJECT_ID('awsdms.rtm_dump_dblog'),
-    OBJECT_ID('awsdms.rtm_position_1st_timestamp')
+    OBJECT_ID(N'awsdms.rtm_dump_dblog'),
+    OBJECT_ID(N'awsdms.rtm_position_1st_timestamp')
 );
 GO
 
-PRINT '03 - Certificates created and procedures signed successfully.';
+PRINT '03 - Canonical certificates created and procedures signed.';
 GO
