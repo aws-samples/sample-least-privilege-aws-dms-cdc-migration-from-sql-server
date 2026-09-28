@@ -6,6 +6,10 @@ Unlike the base guidance in [Setting up ongoing replication on a standalone SQL 
 
 The tested implementation uses SQL Server certificate-signed wrapper procedures. The DMS login receives the verified minimum working permissions, while two non-interactive certificate logins activate `sysadmin` only while the signed modules execute.
 
+> **Disclaimer:** This is sample code, for non-production usage. You should work with
+> your security and legal teams to meet your organizational security, regulatory and
+> compliance requirements before deployment.
+
 ## Repository contents
 
 | Path | Purpose |
