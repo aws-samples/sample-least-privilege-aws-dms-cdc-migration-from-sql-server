@@ -2,6 +2,8 @@
 
 This sample supports the AWS Database Blog walkthrough for running AWS Database Migration Service (AWS DMS) change data capture (CDC) from a self-managed SQL Server source without granting `sysadmin` to the DMS endpoint login.
 
+Unlike the base guidance in [Setting up ongoing replication on a standalone SQL Server without sysadmin](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Source.SQLServer.CDC.html#CHAP_SupportScripts.SQLServer.standalone), this sample covers the full least-privilege pattern end to end: CDC with certificate-signed wrapper procedures, per-replica setup for Always On Availability Groups, and secrets and encryption handled through AWS Secrets Manager and a customer managed AWS KMS key. Start with the AWS documentation if you only need the base non-sysadmin setup; use this sample when your security team also blocks the broader permissions those steps assume.
+
 The tested implementation uses SQL Server certificate-signed wrapper procedures. The DMS login receives the verified minimum working permissions, while two non-interactive certificate logins activate `sysadmin` only while the signed modules execute.
 
 ## Repository contents
