@@ -305,7 +305,7 @@ CREATE PROCEDURE [awsdms].[rtm_position_1st_timestamp]
     @dbname SYSNAME,
     @seqno INTEGER,
     @filename VARCHAR(260),
-    @1stTimeStamp VARCHAR(40)
+    @firstTimeStamp VARCHAR(40)
 )
 AS
 BEGIN
@@ -316,9 +316,11 @@ BEGIN
     DECLARE @nl CHAR(2);
     DECLARE @tb CHAR(2);
     DECLARE @fnameVar NVARCHAR(254) = ''NULL'';
+    DECLARE @firstTimeStampLiteral NVARCHAR(100);
 
     SET @nl = CHAR(10);
     SET @tb = CHAR(9);
+    SET @firstTimeStampLiteral = QUOTENAME(@firstTimeStamp, '''''''');
 
     IF (@filename IS NOT NULL)
         SET @fnameVar = '''''''' + @filename + '''''''';
@@ -328,7 +330,7 @@ BEGIN
         ''FROM fn_dump_dblog (NULL, NULL, NULL, '' + CAST(@seqno AS VARCHAR(10)) + '','' + @fnameVar + '','' + @nl +
         @tb + ''' + @defaults + ')'' + @nl +
         ''where operation=''''LOP_BEGIN_XACT'''''' + @nl +
-        ''and [Begin Time]>= cast('' + '''''''' + @1stTimeStamp + '''''''' + '' as datetime)'' + @nl;
+        ''and [Begin Time]>= cast('' + @firstTimeStampLiteral + '' as datetime)'' + @nl;
 
     DELETE FROM @firstMatching;
     INSERT INTO @firstMatching EXEC sp_executesql @sql;

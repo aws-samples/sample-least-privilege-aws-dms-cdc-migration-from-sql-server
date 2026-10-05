@@ -151,7 +151,7 @@ CREATE PROCEDURE awsdms.rtm_position_1st_timestamp
     @dbname SYSNAME,
     @seqno INTEGER,
     @filename VARCHAR(260),
-    @1stTimeStamp VARCHAR(40)
+    @firstTimeStamp VARCHAR(40)
 )
 AS
 BEGIN
@@ -162,6 +162,9 @@ BEGIN
     DECLARE @newline CHAR(2) = CHAR(10);
     DECLARE @tab CHAR(2) = CHAR(9);
     DECLARE @filename_variable NVARCHAR(254) = ''NULL'';
+    DECLARE @firstTimeStampLiteral NVARCHAR(100);
+
+    SET @firstTimeStampLiteral = QUOTENAME(@firstTimeStamp, '''''''');
 
     IF @filename IS NOT NULL
         SET @filename_variable = '''''''' + @filename + '''''''';
@@ -171,7 +174,7 @@ SELECT TOP (1) [Current LSN], [Begin Time]
 FROM fn_dump_dblog (NULL, NULL, NULL, '' + CAST(@seqno AS VARCHAR(10)) + '',''
         + @filename_variable + '','' + @newline + @tab + ''' + @defaults + N')
 WHERE [operation] = ''''LOP_BEGIN_XACT''''
-  AND [Begin Time] >= CAST('''''''' + @1stTimeStamp + '''''''' AS DATETIME);'';
+  AND [Begin Time] >= CAST('' + @firstTimeStampLiteral + '' AS DATETIME);'';
 
     INSERT INTO @firstMatching
         EXEC sys.sp_executesql @statement;
